@@ -123,3 +123,8 @@ npx expo start
 **Team ELSEE** — Accessibility Track / Interactive Media Track
 
 Tech stack: YOLOv8 · MiDaS · Gemini API · ElevenLabs · Auth0 · Cloudflare · Vultr · DigitalOcean · Snowflake · MongoDB Atlas · React Native · FastAPI · ONNX Runtime
+
+# elsee
+`python3 -m venv venv `
+`source venv/bin/activate`
+`pip install -q -U google-genai elevenlabs pymongo python-dotenv`
