@@ -1,10 +1,14 @@
-import { useRef, useState, useCallback, useEffect } from 'react';
+import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity,
-  ScrollView, Dimensions, Alert, Platform,
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  ScrollView,
+  Dimensions,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import { Audio } from 'expo-av';
 import type { RecordingOptions } from 'expo-av/build/Audio/Recording.types';
 import {
@@ -15,14 +19,114 @@ import {
 } from 'expo-av/build/Audio/RecordingConstants';
 import * as Speech from 'expo-speech';
 import { useRouter } from 'expo-router';
+import { useIsFocused } from '@react-navigation/native';
+import {
+  Camera,
+  useCameraDevice,
+  useCameraPermission,
+  useFrameProcessor,
+  runAtTargetFps,
+} from 'react-native-vision-camera';
+import { runOnJS } from 'react-native-reanimated';
+import { useTensorflowModel } from 'react-native-fast-tflite';
+import { useResizePlugin } from 'vision-camera-resize-plugin';
+import {
+  parseYoloOutputLayout,
+  postprocessYoloToFlat,
+  maxObstacleAreaFraction,
+  YOLO_INPUT_SIZE,
+} from './yoloWorklet';
 
 const { width: W } = Dimensions.get('window');
 
-const GEMINI_API_KEY = process.env.EXPO_PUBLIC_GEMINI_API_KEY || '';
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+const COCO_CLASSES: string[] = [
+  'person',
+  'bicycle',
+  'car',
+  'motorcycle',
+  'airplane',
+  'bus',
+  'train',
+  'truck',
+  'boat',
+  'traffic light',
+  'fire hydrant',
+  'stop sign',
+  'parking meter',
+  'bench',
+  'bird',
+  'cat',
+  'dog',
+  'horse',
+  'sheep',
+  'cow',
+  'elephant',
+  'bear',
+  'zebra',
+  'giraffe',
+  'backpack',
+  'umbrella',
+  'handbag',
+  'tie',
+  'suitcase',
+  'frisbee',
+  'skis',
+  'snowboard',
+  'sports ball',
+  'kite',
+  'baseball bat',
+  'baseball glove',
+  'skateboard',
+  'surfboard',
+  'tennis racket',
+  'bottle',
+  'wine glass',
+  'cup',
+  'fork',
+  'knife',
+  'spoon',
+  'bowl',
+  'banana',
+  'apple',
+  'sandwich',
+  'orange',
+  'broccoli',
+  'carrot',
+  'hot dog',
+  'pizza',
+  'donut',
+  'cake',
+  'chair',
+  'couch',
+  'potted plant',
+  'bed',
+  'dining table',
+  'toilet',
+  'tv',
+  'laptop',
+  'mouse',
+  'remote',
+  'keyboard',
+  'cell phone',
+  'microwave',
+  'oven',
+  'toaster',
+  'sink',
+  'refrigerator',
+  'book',
+  'clock',
+  'vase',
+  'scissors',
+  'teddy bear',
+  'hair drier',
+  'toothbrush',
+];
 
-/** How often to run the yes/no hazard check (still frame → Gemini). */
-const CAUTION_CHECK_INTERVAL_MS = 3000;
+const DEFAULT_CONF = Number(process.env.EXPO_PUBLIC_YOLO_CONF_THRESHOLD) || 0.25;
+const CAUTION_AREA =
+  process.env.EXPO_PUBLIC_YOLO_CAUTION_AREA_FRACTION != null
+    ? Number(process.env.EXPO_PUBLIC_YOLO_CAUTION_AREA_FRACTION)
+    : 0.25;
 
 const SPEECH_DB = -38;
 const LOUD_TICKS_TO_SWITCH_ASK = 4;
@@ -66,27 +170,166 @@ function getLiveSpeechRecordingOptions(): RecordingOptions {
   };
 }
 
-/** Single-word model reply: YES → speak "caution" (debounced). */
-function textSaysCautionNeeded(raw: string): boolean {
-  const t = raw.replace(/```[\s\S]*?```/g, ' ').trim().toUpperCase();
-  if (/^\s*YES\b/.test(t)) return true;
-  if (/\bYES\b/.test(t) && !/^\s*NO\b/.test(t)) return true;
-  return false;
+type YoloDetection = {
+  label: string;
+  confidence: number;
+  area_fraction: number;
+  bbox_xyxy: [number, number, number, number];
+};
+
+/** Map bbox from frame pixels to overlay coords (preview uses uniform scale). */
+function mapBboxToOverlay(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  imgW: number,
+  imgH: number,
+  layoutW: number,
+  layoutH: number,
+): { left: number; top: number; width: number; height: number } {
+  const scale = Math.min(layoutW / imgW, layoutH / imgH);
+  const ox = (layoutW - imgW * scale) / 2;
+  const oy = (layoutH - imgH * scale) / 2;
+  return {
+    left: ox + x1 * scale,
+    top: oy + y1 * scale,
+    width: (x2 - x1) * scale,
+    height: (y2 - y1) * scale,
+  };
 }
+
+const TFLITE_MODEL = require('../assets/models/yolov8n.tflite');
 
 export default function LiveScreen() {
   const router = useRouter();
-  const [permission, requestPermission] = useCameraPermissions();
-  const [facing, setFacing] = useState<CameraType>('back');
+  const isFocused = useIsFocused();
+  const { hasPermission, requestPermission } = useCameraPermission();
+  const [facing, setFacing] = useState<'back' | 'front'>('back');
+  const device = useCameraDevice(facing);
   const [isLiveMode, setIsLiveMode] = useState(false);
-  const [statusMsg, setStatusMsg] = useState('Press START for live preview and path checks');
-  const cameraRef = useRef<CameraView>(null);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const checkingRef = useRef(false);
+  const [statusMsg, setStatusMsg] = useState(
+    'Press START for on-device YOLO and path checks',
+  );
+  const [cameraLayout, setCameraLayout] = useState<{ width: number; height: number } | null>(
+    null,
+  );
+  const [yoloOverlay, setYoloOverlay] = useState<{
+    frameW: number;
+    frameH: number;
+    detections: YoloDetection[];
+  } | null>(null);
+
+  const delegate = 'default';
+  const tfPlugin = useTensorflowModel(TFLITE_MODEL, delegate);
+
+  const outputMeta = useMemo(() => {
+    if (tfPlugin.state !== 'loaded' || !tfPlugin.model) return null;
+    const shape = tfPlugin.model.outputs[0]?.shape;
+    if (!shape) return null;
+    return parseYoloOutputLayout(shape);
+  }, [tfPlugin.state, tfPlugin.model]);
+
+  const inputKind = useMemo(() => {
+    if (tfPlugin.state !== 'loaded' || !tfPlugin.model) return null;
+    const t = tfPlugin.model.inputs[0];
+    if (!t?.shape || t.shape.length !== 4) return 'unsupported' as const;
+    const sh = t.shape;
+    const last = sh[3];
+    if (sh[1] === 3) return 'unsupported' as const;
+    if (last === 3 && (t.dataType === 'float32' || t.dataType === 'float16'))
+      return 'float32_nhwc' as const;
+    if (last === 3 && t.dataType === 'uint8') return 'uint8_nhwc' as const;
+    return 'unsupported' as const;
+  }, [tfPlugin.state, tfPlugin.model]);
+
   const lastCautionAtRef = useRef(0);
   const liveVadRef = useRef<Audio.Recording | null>(null);
   const loudTicksRef = useRef(0);
   const liveNavigatingRef = useRef(false);
+
+  const { resize } = useResizePlugin();
+
+  const onDetectionsNative = useCallback(
+    (flat: Float32Array, fw: number, fh: number) => {
+      const count = Math.min(flat[0], 40);
+      const dets: YoloDetection[] = [];
+      const frameArea = fw * fh;
+      for (let i = 0; i < count; i++) {
+        const o = 1 + i * 6;
+        const x1 = flat[o];
+        const y1 = flat[o + 1];
+        const x2 = flat[o + 2];
+        const y2 = flat[o + 3];
+        const cls = Math.round(flat[o + 4]);
+        const conf = flat[o + 5];
+        const bw = Math.max(0, x2 - x1);
+        const bh = Math.max(0, y2 - y1);
+        const area_fraction =
+          frameArea > 0 ? (bw * bh) / frameArea : 0;
+        const label =
+          cls >= 0 && cls < COCO_CLASSES.length ? COCO_CLASSES[cls] : 'unknown';
+        dets.push({
+          label,
+          confidence: conf,
+          area_fraction,
+          bbox_xyxy: [x1, y1, x2, y2],
+        });
+      }
+      if (fw > 0 && fh > 0) {
+        setYoloOverlay({ frameW: fw, frameH: fh, detections: dets });
+      }
+
+      const maxFrac = maxObstacleAreaFraction(flat, fw, fh);
+      if (maxFrac >= CAUTION_AREA) {
+        const now = Date.now();
+        if (now - lastCautionAtRef.current >= CAUTION_DEBOUNCE_MS) {
+          lastCautionAtRef.current = now;
+          Speech.speak('caution', { rate: 1.05, pitch: 1.0 });
+        }
+      }
+    },
+    [],
+  );
+
+  const frameProcessor = useFrameProcessor(
+    (frame) => {
+      'worklet';
+      const model = tfPlugin.model;
+      const meta = outputMeta;
+      if (model == null || meta == null) return;
+      if (inputKind === 'unsupported' || inputKind == null) return;
+
+      runAtTargetFps(5, () => {
+        'worklet';
+        const resized =
+          inputKind === 'uint8_nhwc'
+            ? resize(frame, {
+                scale: { width: YOLO_INPUT_SIZE, height: YOLO_INPUT_SIZE },
+                pixelFormat: 'rgb',
+                dataType: 'uint8',
+              })
+            : resize(frame, {
+                scale: { width: YOLO_INPUT_SIZE, height: YOLO_INPUT_SIZE },
+                pixelFormat: 'rgb',
+                dataType: 'float32',
+              });
+
+        const outputs = model.runSync([resized]);
+        const out = outputs[0] as Float32Array;
+        const flat = postprocessYoloToFlat(
+          out,
+          meta.layout,
+          meta.numAnchors,
+          frame.width,
+          frame.height,
+          DEFAULT_CONF,
+        );
+        runOnJS(onDetectionsNative)(flat, frame.width, frame.height);
+      });
+    },
+    [tfPlugin.model, outputMeta, inputKind, resize, onDetectionsNative],
+  );
 
   const stopLiveVadRecording = useCallback(async () => {
     const rec = liveVadRef.current;
@@ -102,72 +345,18 @@ export default function LiveScreen() {
 
   useEffect(() => {
     return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
       void stopLiveVadRecording();
     };
   }, [stopLiveVadRecording]);
-
-  const runCautionCheckOnly = useCallback(async () => {
-    if (checkingRef.current || !cameraRef.current || liveNavigatingRef.current) return;
-    if (!GEMINI_API_KEY) return;
-    checkingRef.current = true;
-
-    try {
-      const photo = await cameraRef.current.takePictureAsync({
-        base64: true,
-        quality: 0.35,
-        skipProcessing: true,
-        shutterSound: false,
-      });
-
-      if (!photo?.base64) return;
-
-      const prompt = `You help a blind person walking forward. Look at this single image.
-Is there an immediate obstacle in their path (within about 2 meters) that could cause a collision or trip?
-Reply with exactly one word: YES or NO. No other text.`;
-
-      const response = await fetch(GEMINI_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{
-            parts: [
-              { text: prompt },
-              { inline_data: { mime_type: 'image/jpeg', data: photo.base64 } },
-            ],
-          }],
-          generationConfig: { temperature: 0, maxOutputTokens: 8 },
-        }),
-      });
-
-      const data = await response.json();
-      const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-
-      if (textSaysCautionNeeded(raw)) {
-        const now = Date.now();
-        if (now - lastCautionAtRef.current >= CAUTION_DEBOUNCE_MS) {
-          lastCautionAtRef.current = now;
-          Speech.speak('caution', { rate: 1.0, pitch: 1.0 });
-        }
-      }
-    } catch {
-      /* ignore — next tick retries */
-    } finally {
-      checkingRef.current = false;
-    }
-  }, []);
 
   const goToAskFromVoice = useCallback(() => {
     if (liveNavigatingRef.current) return;
     liveNavigatingRef.current = true;
     Speech.stop();
     void stopLiveVadRecording();
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
     setIsLiveMode(false);
-    setStatusMsg('Press START for live preview and path checks');
+    setYoloOverlay(null);
+    setStatusMsg('Press START for on-device YOLO and path checks');
     router.push('/ask');
     setTimeout(() => {
       liveNavigatingRef.current = false;
@@ -214,7 +403,7 @@ Reply with exactly one word: YES or NO. No other text.`;
               loudTicksRef.current = 0;
             }
           },
-          100
+          100,
         );
         if (cancelled) {
           try {
@@ -236,26 +425,42 @@ Reply with exactly one word: YES or NO. No other text.`;
     };
   }, [isLiveMode, goToAskFromVoice, stopLiveVadRecording]);
 
+  useEffect(() => {
+    if (tfPlugin.state === 'error') {
+      const err = 'error' in tfPlugin ? tfPlugin.error : undefined;
+      setStatusMsg(
+        `Model: ${err?.message ?? 'failed to load'} — add a valid yolov8n.tflite under assets/models (Ultralytics export).`,
+      );
+    }
+  }, [tfPlugin]);
+
   const startLiveMode = () => {
-    if (!GEMINI_API_KEY) {
-      Alert.alert('Missing API Key', 'Set EXPO_PUBLIC_GEMINI_API_KEY in your .env file');
+    if (tfPlugin.state !== 'loaded') {
+      setStatusMsg('Wait for the YOLO model to finish loading.');
+      return;
+    }
+    if (inputKind === 'unsupported') {
+      setStatusMsg(
+        'This TFLite model input shape is not supported. Use NHWC 640×640×3 (float32 or uint8).',
+      );
+      return;
+    }
+    if (outputMeta == null) {
+      setStatusMsg('Unsupported YOLO output tensor layout.');
       return;
     }
     lastCautionAtRef.current = 0;
     liveNavigatingRef.current = false;
     setIsLiveMode(true);
-    setStatusMsg('Live — preview only; “caution” when the path may be blocked. Speak to open Ask.');
-    intervalRef.current = setInterval(runCautionCheckOnly, CAUTION_CHECK_INTERVAL_MS);
-    void runCautionCheckOnly();
+    setStatusMsg(
+      'Live — on-device YOLO · obstacle boxes · “caution” if large in frame. Speak → Ask.',
+    );
   };
 
   const stopLiveMode = () => {
     setIsLiveMode(false);
-    setStatusMsg('Press START for live preview and path checks');
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
+    setYoloOverlay(null);
+    setStatusMsg('Press START for on-device YOLO and path checks');
     Speech.stop();
     void stopLiveVadRecording();
   };
@@ -264,22 +469,36 @@ Reply with exactly one word: YES or NO. No other text.`;
     setFacing((f) => (f === 'back' ? 'front' : 'back'));
   };
 
-  if (!permission) return <View style={s.container} />;
-
-  if (!permission.granted) {
+  if (!hasPermission) {
     return (
       <SafeAreaView style={s.container}>
         <View style={s.permBox}>
           <Text style={s.permIcon}>📷</Text>
           <Text style={s.permTitle}>Camera Access Needed</Text>
           <Text style={s.permSub}>SeeForMe needs your camera for live preview</Text>
-          <TouchableOpacity style={s.permBtn} onPress={requestPermission}>
+          <TouchableOpacity style={s.permBtn} onPress={() => void requestPermission()}>
             <Text style={s.permBtnText}>Grant Camera Permission</Text>
           </TouchableOpacity>
         </View>
       </SafeAreaView>
     );
   }
+
+  if (device == null) {
+    return (
+      <SafeAreaView style={s.container}>
+        <View style={s.permBox}>
+          <Text style={s.permSub}>No camera device available.</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  const modelReady = tfPlugin.state === 'loaded' && tfPlugin.model != null;
+  const fp =
+    isLiveMode && modelReady && inputKind !== 'unsupported' && outputMeta != null
+      ? frameProcessor
+      : undefined;
 
   return (
     <SafeAreaView style={s.container}>
@@ -294,11 +513,63 @@ Reply with exactly one word: YES or NO. No other text.`;
       </View>
 
       <ScrollView contentContainerStyle={s.content} showsVerticalScrollIndicator={false}>
-        <View style={s.cameraWrap}>
-          <CameraView ref={cameraRef} style={s.camera} facing={facing} />
+        <View
+          style={s.cameraWrap}
+          onLayout={(e) => {
+            const { width, height } = e.nativeEvent.layout;
+            if (width > 0 && height > 0) setCameraLayout({ width, height });
+          }}
+        >
+          <Camera
+            style={s.camera}
+            device={device}
+            isActive={isFocused}
+            frameProcessor={fp}
+            pixelFormat="yuv"
+            photo={false}
+            video={false}
+            audio={false}
+          />
+          {isLiveMode && yoloOverlay && cameraLayout && yoloOverlay.frameW > 0 && (
+            <View style={s.boxOverlay} pointerEvents="none">
+              {yoloOverlay.detections.map((det, i) => {
+                const [x1, y1, x2, y2] = det.bbox_xyxy;
+                const rect = mapBboxToOverlay(
+                  x1,
+                  y1,
+                  x2,
+                  y2,
+                  yoloOverlay.frameW,
+                  yoloOverlay.frameH,
+                  cameraLayout.width,
+                  cameraLayout.height,
+                );
+                return (
+                  <View
+                    key={`${det.label}-${i}-${rect.left.toFixed(0)}`}
+                    style={[
+                      s.boxRect,
+                      {
+                        left: rect.left,
+                        top: rect.top,
+                        width: Math.max(2, rect.width),
+                        height: Math.max(2, rect.height),
+                      },
+                    ]}
+                  >
+                    <Text style={s.boxLabel} numberOfLines={1}>
+                      {det.label} {Math.round(det.confidence * 100)}%
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+          )}
           <View style={s.liveVideoBadge}>
             <Text style={s.liveVideoBadgeText}>LIVE</Text>
-            <Text style={s.liveVideoSub}>Real-time preview</Text>
+            <Text style={s.liveVideoSub}>
+              {modelReady ? 'On-device YOLO' : 'Loading model…'}
+            </Text>
           </View>
           {isLiveMode && (
             <View style={s.askHint}>
@@ -318,6 +589,7 @@ Reply with exactly one word: YES or NO. No other text.`;
         <TouchableOpacity
           style={[s.mainBtn, isLiveMode && s.mainBtnStop]}
           onPress={isLiveMode ? stopLiveMode : startLiveMode}
+          disabled={!modelReady && !isLiveMode}
         >
           <Text style={s.mainBtnText}>
             {isLiveMode ? '⏹  STOP' : '▶  START'}
@@ -369,10 +641,35 @@ const s = StyleSheet.create({
     position: 'relative',
   },
   camera: { flex: 1 },
+  boxOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 2,
+  },
+  boxRect: {
+    position: 'absolute',
+    borderWidth: 2,
+    borderColor: '#00F5C4',
+    backgroundColor: 'rgba(0,245,196,0.08)',
+  },
+  boxLabel: {
+    position: 'absolute',
+    top: -18,
+    left: 0,
+    backgroundColor: 'rgba(0,0,0,0.75)',
+    color: '#00F5C4',
+    fontSize: 9,
+    fontWeight: '700',
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    borderRadius: 4,
+    overflow: 'hidden',
+    maxWidth: 120,
+  },
   liveVideoBadge: {
     position: 'absolute',
     top: 10,
     left: 10,
+    zIndex: 6,
     backgroundColor: 'rgba(0,0,0,0.55)',
     paddingHorizontal: 10,
     paddingVertical: 6,
@@ -391,6 +688,7 @@ const s = StyleSheet.create({
     position: 'absolute',
     bottom: 16,
     alignSelf: 'center',
+    zIndex: 6,
     backgroundColor: 'rgba(0,0,0,0.6)',
     paddingHorizontal: 12,
     paddingVertical: 6,
@@ -401,6 +699,7 @@ const s = StyleSheet.create({
     position: 'absolute',
     top: 10,
     right: 10,
+    zIndex: 6,
     backgroundColor: 'rgba(0,0,0,0.5)',
     borderRadius: 20,
     padding: 8,

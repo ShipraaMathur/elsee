@@ -27,7 +27,7 @@ export default function SettingsScreen() {
         <Text style={s.sectionLabel}>HOW TO USE</Text>
         <View style={s.infoCard}>
           <Text style={s.infoText}>
-            👁  <Text style={s.infoBold}>Live tab</Text> — START shows a real-time preview; a simple yes/no check runs in the background to say “caution” if the path may be blocked. No obstacle list. Speak to switch to Ask.
+            👁  <Text style={s.infoBold}>Live tab</Text> — START runs YOLOv8 on the phone (bundled .tflite). Boxes show path obstacles; “caution” if a box is large in frame. Use a dev build (not Expo Go). Speak to switch to Ask.
           </Text>
           <Text style={s.infoText}>
             🎙  <Text style={s.infoBold}>Ask tab</Text> — Hold the mic button and ask a question like "What's in front of me?" or "What does that sign say?". SeeForMe captures the scene and speaks the answer.
@@ -41,7 +41,7 @@ export default function SettingsScreen() {
         <View style={s.techWrap}>
           {[
             'Gemini 1.5 Flash', 'ElevenLabs TTS', 'expo-camera',
-            'expo-av', 'expo-speech', 'YOLOv8 (Pi/Jetson)',
+            'expo-av', 'expo-speech', 'YOLOv8 TFLite (on-device)',
             'MiDaS Depth', 'FastAPI Backend', 'MongoDB Atlas',
             'Snowflake', 'Auth0', 'Cloudflare',
           ].map((t) => (

@@ -41,6 +41,15 @@
           "cameraPermission": "SeeForMe uses the camera to detect obstacles.",
           "microphonePermission": "SeeForMe uses the microphone for voice queries."
         }
+      ],
+      [
+        "react-native-vision-camera",
+        {
+          "cameraPermissionText": "SeeForMe uses the camera for on-device obstacle detection.",
+          "enableMicrophonePermission": true,
+          "microphonePermissionText": "SeeForMe uses the microphone to switch to Ask by voice.",
+          "enableFrameProcessors": true
+        }
       ]
     ],
     "scheme": "seefore",

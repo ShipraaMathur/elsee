@@ -30,4 +30,4 @@ pymongo==4.9.2
 snowflake-connector-python==3.10.1
 
 # WebSockets
-websockets
+websockets>=13,<15
