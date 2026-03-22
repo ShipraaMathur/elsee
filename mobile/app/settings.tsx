@@ -27,7 +27,7 @@ export default function SettingsScreen() {
         <Text style={s.sectionLabel}>HOW TO USE</Text>
         <View style={s.infoCard}>
           <Text style={s.infoText}>
-            👁  <Text style={s.infoBold}>Live tab</Text> — Press START to begin real-time obstacle detection. Camera analyzes surroundings every 3 seconds and speaks warnings for nearby objects.
+            👁  <Text style={s.infoBold}>Live tab</Text> — START shows a real-time preview; a simple yes/no check runs in the background to say “caution” if the path may be blocked. No obstacle list. Speak to switch to Ask.
           </Text>
           <Text style={s.infoText}>
             🎙  <Text style={s.infoBold}>Ask tab</Text> — Hold the mic button and ask a question like "What's in front of me?" or "What does that sign say?". SeeForMe captures the scene and speaks the answer.

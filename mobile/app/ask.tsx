@@ -90,7 +90,7 @@ async function uploadRecordingToDevMachine(
 const SPEECH_DB = -38;
 const SILENCE_DB = -42;
 const LOUD_TICKS_TO_START = 3;
-const SILENCE_END_MS = 1400;
+const SILENCE_END_MS = 140;
 const MIN_UTTERANCE_MS = 800;
 const MAX_LISTEN_MS = 50000;
 
@@ -197,7 +197,7 @@ export default function AskScreen() {
     if (!cameraRef.current) return '';
     try {
       const photo = await cameraRef.current.takePictureAsync({
-        base64: true, quality: 0.5, skipProcessing: true,
+        base64: true, quality: 0.5, skipProcessing: true, shutterSound: false,
       });
       return photo?.base64 || '';
     } catch { return ''; }
