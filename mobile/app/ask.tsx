@@ -24,10 +24,107 @@ const GEMINI_API_KEY  = process.env.EXPO_PUBLIC_GEMINI_API_KEY  || '';
 const ELEVENLABS_KEY  = process.env.EXPO_PUBLIC_ELEVENLABS_KEY  || '';
 const ELEVENLABS_VOICE = process.env.EXPO_PUBLIC_ELEVENLABS_VOICE || '21m00Tcm4TlvDq8ikWAM';
 
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
-const GEMINI_STT_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+const GEMINI_STT_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
 
 const DEV_SYNC_SECRET = process.env.EXPO_PUBLIC_DEV_SYNC_SECRET || '';
+const TRANSCRIPT_LOG_SECRET = process.env.EXPO_PUBLIC_TRANSCRIPT_LOG_SECRET || '';
+
+const mongoLogHeaders = (): Record<string, string> => {
+  const h: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (TRANSCRIPT_LOG_SECRET) h['X-Transcript-Secret'] = TRANSCRIPT_LOG_SECRET;
+  return h;
+};
+
+type MongoStoredPayload = {
+  stored?: boolean;
+  atlas_cluster_host?: string;
+  database?: string;
+  collection?: string;
+};
+
+function warnIfNotStored(
+  label: string,
+  apiBase: string,
+  data: MongoStoredPayload,
+): void {
+  if (data.stored) return;
+  console.warn(
+    `[${label}] NOT saved to MongoDB (stored=false). ` +
+      `The API at ${apiBase} may have no MONGODB_URI, or Mongo is down. ` +
+      `Collections only appear in Atlas after a successful insert — check the same cluster/DB your deployed server uses.`,
+  );
+}
+
+async function logTranscriptToBackend(apiBase: string, text: string): Promise<void> {
+  const trimmed = (text || '').trim();
+  if (!apiBase || !trimmed) {
+    if (trimmed && !apiBase) {
+      console.warn('[transcript] skipped: EXPO_PUBLIC_BACKEND_URL / api_base_url is empty');
+    }
+    return;
+  }
+  try {
+    const res = await fetch(`${apiBase}/api/transcripts`, {
+      method: 'POST',
+      headers: mongoLogHeaders(),
+      body: JSON.stringify({
+        transcript: trimmed,
+        source: 'mobile_ask',
+        platform: Platform.OS,
+      }),
+    });
+    if (!res.ok) {
+      console.warn('[transcript log]', res.status, await res.text());
+      return;
+    }
+    const data = (await res.json()) as MongoStoredPayload;
+    warnIfNotStored('transcript', apiBase, data);
+    if (__DEV__ && data.stored) {
+      console.log(
+        `[transcript] MongoDB Atlas: ${data.database}.${data.collection} @ ${data.atlas_cluster_host}`,
+      );
+    }
+  } catch (e) {
+    console.warn('[transcript log] network', e);
+  }
+}
+
+/** Full Ask Q&A (device Gemini) — collection ``ask_conversations`` on the backend MongoDB. */
+async function logAskConversationToBackend(
+  apiBase: string,
+  query: string,
+  response: string,
+): Promise<void> {
+  const q = (query || '').trim();
+  const r = (response || '').trim();
+  if (!apiBase || (!q && !r)) return;
+  try {
+    const res = await fetch(`${apiBase}/api/ask-conversations`, {
+      method: 'POST',
+      headers: mongoLogHeaders(),
+      body: JSON.stringify({
+        query: q,
+        response: r,
+        source: 'mobile_ask',
+        platform: Platform.OS,
+      }),
+    });
+    if (!res.ok) {
+      console.warn('[ask-conversation log]', res.status, await res.text());
+      return;
+    }
+    const data = (await res.json()) as MongoStoredPayload;
+    warnIfNotStored('ask-conversation', apiBase, data);
+    if (__DEV__ && data.stored) {
+      console.log(
+        `[conversation] MongoDB Atlas: ${data.database}.${data.collection} @ ${data.atlas_cluster_host}`,
+      );
+    }
+  } catch (e) {
+    console.warn('[ask-conversation log] network', e);
+  }
+}
 
 /** Saved on device for pipelines that expect `query.wav` (iOS: PCM WAV; Android: AAC in .m4a bytes copied to this name). */
 const QUERY_WAV_FILENAME = 'query.wav';
@@ -146,6 +243,10 @@ export default function AskScreen() {
     /\/$/,
     '',
   );
+  const apiBase = (remote.api_base_url || process.env.EXPO_PUBLIC_BACKEND_URL || '').replace(
+    /\/$/,
+    '',
+  );
 
   const [camPermission, requestCamPermission] = useCameraPermissions();
   const [facing, setFacing] = useState<CameraType>('back');
@@ -155,6 +256,7 @@ export default function AskScreen() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [textInput, setTextInput] = useState('');
   const [session, setSession] = useState<Session | null>(null);
+  const [liveTranscript, setLiveTranscript] = useState('');
   const [error, setError] = useState('');
   const cameraRef = useRef<CameraView>(null);
   const vadRecordingRef = useRef<Audio.Recording | null>(null);
@@ -306,6 +408,9 @@ export default function AskScreen() {
       setIsProcessing(true);
       setVadPhase('idle');
       const query = await transcribeAudio(audioB64, mime);
+      setLiveTranscript(query);
+      await speakResponse(query);
+      await logTranscriptToBackend(apiBase, query);
       await processQuery(query, frameB64, queryWavUri);
     } catch (e: any) {
       setError('Error: ' + e.message);
@@ -379,6 +484,9 @@ export default function AskScreen() {
         const mime = uri?.endsWith('.wav') ? 'audio/wav' : 'audio/mp4';
         query = await transcribeAudio(audioB64, mime);
       }
+      setLiveTranscript(query);
+      await speakResponse(query);
+      await logTranscriptToBackend(apiBase, query);
 
       await processQuery(query, frameB64, uri ? queryWavUri : undefined);
     } catch (e: any) {
@@ -416,9 +524,12 @@ export default function AskScreen() {
     if (!textInput.trim()) return;
     setIsProcessing(true);
     setError('');
+    const q = textInput.trim();
     try {
       const frameB64 = await captureFrame();
-      await processQuery(textInput.trim(), frameB64, undefined);
+      setLiveTranscript(q);
+      await logTranscriptToBackend(apiBase, q);
+      await processQuery(q, frameB64, undefined);
       setTextInput('');
     } catch (e: any) {
       setError('Error: ' + e.message);
@@ -487,12 +598,17 @@ Start with the most important safety information first.`;
     sessions.unshift(newSession);
     await AsyncStorage.setItem('sf_sessions', JSON.stringify(sessions.slice(0, 50)));
 
+    void logAskConversationToBackend(apiBase, query, responseText);
+
     // Speak response — ElevenLabs if key available, else expo-speech
     await speakResponse(responseText);
   };
 
-  // ── TTS ─────────────────────────────────────────────────────────────────────
-  const speakResponse = async (text: string) => {
+  // ── TTS (same path for STT echo + Gemini answer) ────────────────────────────
+  const speakResponse = async (text: string): Promise<void> => {
+    const t = (text || '').trim();
+    if (!t) return;
+
     if (ELEVENLABS_KEY) {
       try {
         const res = await fetch(
@@ -505,35 +621,57 @@ Start with the most important safety information first.`;
               'Accept': 'audio/mpeg',
             },
             body: JSON.stringify({
-              text,
+              text: t,
               model_id: 'eleven_turbo_v2',
               voice_settings: { stability: 0.5, similarity_boost: 0.75 },
             }),
           }
         );
+        if (!res.ok) throw new Error('ElevenLabs TTS failed');
         const audioBlob = await res.blob();
-        const reader = new FileReader();
-        reader.readAsDataURL(audioBlob);
-        reader.onloadend = async () => {
-          const base64Audio = (reader.result as string).split(',')[1];
-          const audioPath = FileSystem.cacheDirectory + 'response.mp3';
-          await FileSystem.writeAsStringAsync(audioPath, base64Audio, {
-            encoding: FileSystem.EncodingType.Base64,
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result as string);
+          reader.onerror = () => reject(new Error('read blob'));
+          reader.readAsDataURL(audioBlob);
+        });
+        const base64Audio = dataUrl.split(',')[1];
+        const audioPath = `${FileSystem.cacheDirectory}tts_${Date.now()}.mp3`;
+        await FileSystem.writeAsStringAsync(audioPath, base64Audio, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        await soundRef.current?.unloadAsync();
+        const { sound } = await Audio.Sound.createAsync(
+          { uri: audioPath },
+          { shouldPlay: true }
+        );
+        soundRef.current = sound;
+        await new Promise<void>((resolve) => {
+          const safety = setTimeout(() => resolve(), 120_000);
+          sound.setOnPlaybackStatusUpdate((status) => {
+            if (!status.isLoaded) return;
+            if (status.didJustFinish) {
+              clearTimeout(safety);
+              resolve();
+            }
           });
-          await soundRef.current?.unloadAsync();
-          const { sound } = await Audio.Sound.createAsync(
-            { uri: audioPath }, { shouldPlay: true }
-          );
-          soundRef.current = sound;
-        };
+        });
         return;
       } catch {
-        // Fall through to expo-speech
+        /* fall through to expo-speech */
       }
     }
-    // Fallback: expo-speech (free, no API key needed)
-    Speech.stop();
-    Speech.speak(text, { rate: 0.95, pitch: 1.0 });
+
+    await Speech.stop();
+    await new Promise<void>((resolve) => {
+      Speech.speak(t, {
+        rate: 0.95,
+        pitch: 1.0,
+        onDone: () => resolve(),
+        onStopped: () => resolve(),
+        onError: () => resolve(),
+      });
+    });
   };
 
   const replayResponse = async () => {
@@ -646,10 +784,16 @@ Start with the most important safety information first.`;
 
         {error ? <Text style={s.error}>{error}</Text> : null}
 
+        {(liveTranscript || session?.query) ? (
+          <View style={s.transcriptCard}>
+            <Text style={s.transcriptLabel}>Transcript (Gemini STT)</Text>
+            <Text style={s.transcriptBody}>{liveTranscript || session?.query}</Text>
+          </View>
+        ) : null}
+
         {/* Response */}
         {session ? (
           <View style={s.responseCard}>
-            <Text style={s.responseQuery}>"{session.query}"</Text>
             {session.frameUri && (
               <Image source={{ uri: session.frameUri }} style={s.responseFrame} resizeMode="cover" />
             )}
@@ -725,11 +869,32 @@ const s = StyleSheet.create({
 
   error: { color: '#FF4D6D', fontSize: 13, textAlign: 'center' },
 
+  transcriptCard: {
+    backgroundColor: '#0a1f1a',
+    borderRadius: 14,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(0,245,196,0.35)',
+    gap: 6,
+  },
+  transcriptLabel: {
+    color: '#00F5C4',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+    textTransform: 'uppercase',
+  },
+  transcriptBody: {
+    color: '#E8EDF5',
+    fontSize: 16,
+    lineHeight: 24,
+    fontWeight: '600',
+  },
+
   responseCard: {
     backgroundColor: '#0E1320', borderRadius: 16,
     padding: 16, gap: 12, borderWidth: 1, borderColor: '#1E2740',
   },
-  responseQuery: { color: '#5A6580', fontSize: 13, fontStyle: 'italic' },
   responseFrame: { width: '100%', height: 180, borderRadius: 10 },
   responseText: { color: '#E8EDF5', fontSize: 15, lineHeight: 22 },
   replayBtn: {

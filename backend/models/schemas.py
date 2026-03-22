@@ -39,3 +39,32 @@ class SceneResponse(BaseModel):
     summary: str
     audio_response_b64: Optional[str] = None
     elapsed_sec: float
+
+
+class TranscriptLogRequest(BaseModel):
+    transcript: str
+    source: Optional[str] = "mobile_ask"
+    platform: Optional[str] = None  # e.g. android, ios — from React Native
+
+
+class TranscriptLogResponse(BaseModel):
+    ok: bool
+    stored: bool
+    atlas_cluster_host: Optional[str] = None
+    database: Optional[str] = None
+    collection: Optional[str] = None
+
+
+class AskConversationLogRequest(BaseModel):
+    query: str
+    response: str
+    source: Optional[str] = "mobile_ask"
+    platform: Optional[str] = None
+
+
+class AskConversationLogResponse(BaseModel):
+    ok: bool
+    stored: bool
+    atlas_cluster_host: Optional[str] = None
+    database: Optional[str] = None
+    collection: Optional[str] = None

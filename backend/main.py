@@ -12,16 +12,20 @@ Handles:
 
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_REPO_ROOT / ".env")
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
 
-from routers import obstacles, query, scene, auth, health, dev_sync, public_config
+from routers import obstacles, query, scene, auth, health, dev_sync, public_config, transcript_log
 from services.mongodb import connect_mongo, close_mongo
 from services.snowflake_client import init_snowflake
-
-load_dotenv()
 
 
 @asynccontextmanager
@@ -58,3 +62,4 @@ app.include_router(query.router, prefix="/api", tags=["Query"])
 app.include_router(scene.router, prefix="/api", tags=["Scene"])
 app.include_router(dev_sync.router, prefix="/api", tags=["Dev"])
 app.include_router(public_config.router, prefix="/api", tags=["Config"])
+app.include_router(transcript_log.router, prefix="/api", tags=["Transcripts"])
