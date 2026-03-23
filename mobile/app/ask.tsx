@@ -19,6 +19,7 @@ import * as Speech from 'expo-speech';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { useRemoteConfig } from '../context/RemoteConfigContext';
+import { useAuth } from '../context/AuthContext';
 
 const GEMINI_API_KEY  = process.env.EXPO_PUBLIC_GEMINI_API_KEY  || '';
 const ELEVENLABS_KEY  = process.env.EXPO_PUBLIC_ELEVENLABS_KEY  || '';
@@ -148,6 +149,14 @@ interface Session {
   timestamp: number;
 }
 
+interface QueryResponse {
+  query: string;
+  text_response: string;
+  audio_response_b64?: string;
+  annotated_frame_b64?: string;
+  elapsed_sec: number;
+}
+
 export default function AskScreen() {
   const remote = useRemoteConfig();
   const devSyncBase = (remote.dev_sync_url || process.env.EXPO_PUBLIC_DEV_SYNC_URL || '').replace(
@@ -177,6 +186,8 @@ export default function AskScreen() {
   const autoListenRef = useRef(true);
   const isProcessingRef = useRef(false);
   const startVadSessionRef = useRef<() => Promise<void>>(async () => {});
+
+  const { user } = useAuth();
 
   useEffect(() => {
     autoListenRef.current = autoListen;
@@ -435,8 +446,102 @@ export default function AskScreen() {
     }
   };
 
-  // ── Main Gemini vision query ────────────────────────────────────────────────
   const processQuery = async (query: string, frameB64: string, audioUri?: string) => {
+    Alert.alert('DEBUG', `Backend URL: "${remote.api_base_url}"`);
+    if (!remote.api_base_url) {
+      Alert.alert('No backend URL', 'Set EXPO_PUBLIC_BACKEND_URL in .env');
+      return;
+    }
+
+    try {
+      // const res = await fetch(`${remote.api_base_url}/api/query`, {
+      //   method: 'POST',
+      //   headers: {
+      //     'Content-Type': 'application/json',
+      //     'Authorization': `Bearer ${user?.accessToken ?? ''}`,
+      //   },
+      //   body: JSON.stringify({
+      //     text_query: query,
+      //     frame_b64: frameB64 || null,
+      //     obstacles: [],
+      //   }),
+      // });
+      const res = await fetch(`${remote.api_base_url}/api/query`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${user?.accessToken ?? ''}`,
+        },
+        body: JSON.stringify({
+          text_query: query,
+          frame_b64: frameB64 || null,
+          obstacles: [],
+        }),
+      });
+
+      Alert.alert('Status', `${res.status}`);
+      if (!res.ok) {
+        const err = await res.text();
+        Alert.alert('Backend Error', `${res.status}: ${err.slice(0, 200)}`);
+        throw new Error(`Backend error ${res.status}: ${err}`);
+      }
+
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`Backend error ${res.status}: ${err}`);
+      }
+
+      const data: QueryResponse = await res.json();
+      const responseText = data.text_response;
+
+      // Save photo locally for display (same as before)
+      let savedUri: string | undefined;
+      if (frameB64) {
+        savedUri = FileSystem.cacheDirectory + `frame_${Date.now()}.jpg`;
+        await FileSystem.writeAsStringAsync(savedUri, frameB64, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+      }
+
+      const newSession: Session = {
+        id: Date.now().toString(),
+        query,
+        response: responseText,
+        frameUri: savedUri,
+        timestamp: Date.now(),
+      };
+
+      setSession(newSession);
+
+      // Still save to AsyncStorage for History tab
+      const existing = await AsyncStorage.getItem('sf_sessions');
+      const sessions: Session[] = existing ? JSON.parse(existing) : [];
+      sessions.unshift(newSession);
+      await AsyncStorage.setItem('sf_sessions', JSON.stringify(sessions.slice(0, 50)));
+
+      // Play audio from backend if ElevenLabs is configured,
+      // otherwise fall back to the text response via expo-speech
+      if (data.audio_response_b64) {
+        const audioPath = `${FileSystem.cacheDirectory}response_${Date.now()}.mp3`;
+        await FileSystem.writeAsStringAsync(audioPath, data.audio_response_b64, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        await soundRef.current?.unloadAsync();
+        const { sound } = await Audio.Sound.createAsync({ uri: audioPath }, { shouldPlay: true });
+        soundRef.current = sound;
+      } else {
+        await speakGeminiOutput(responseText);
+      }
+
+    } catch (e: any) {
+      setError('Error: ' + e.message);
+      // Fallback to direct Gemini if backend is unreachable
+      await processQueryDirectly(query, frameB64);
+    }
+  };
+
+  // ── Main Gemini vision query ────────────────────────────────────────────────
+  const processQueryDirectly = async (query: string, frameB64: string, audioUri?: string) => {
     if (!GEMINI_API_KEY) {
       Alert.alert('Missing Key', 'Set EXPO_PUBLIC_GEMINI_API_KEY in .env');
       return;
@@ -457,19 +562,36 @@ Start with the most important safety information first.`;
       parts.push({ inline_data: { mime_type: 'image/jpeg', data: frameB64 } });
     }
 
-    const res = await fetch(GEMINI_URL, {
+    // const res = await fetch(GEMINI_URL, {
+    //   method: 'POST',
+    //   headers: { 'Content-Type': 'application/json' },
+    //   body: JSON.stringify({
+    //     contents: [{ parts }],
+    //     generationConfig: { temperature: 0.2, maxOutputTokens: 256 },
+    //   }),
+    // });
+
+    // const data = await res.json();
+    // const geminiResult = textFromGeminiResult(data);
+    // const responseText =
+    //   geminiResult || 'Sorry, I could not analyze the scene.';
+    // Replace the direct Gemini fetch block with:
+    const remote = useRemoteConfig();
+
+    const res = await fetch(`${remote.api_base_url}/api/query`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${user?.accessToken}`, // Auth0 token needed
+      },
       body: JSON.stringify({
-        contents: [{ parts }],
-        generationConfig: { temperature: 0.2, maxOutputTokens: 256 },
+        text_query: query,
+        frame_b64: frameB64,
+        obstacles: [],
       }),
     });
-
-    const data = await res.json();
-    const geminiResult = textFromGeminiResult(data);
-    const responseText =
-      geminiResult || 'Sorry, I could not analyze the scene.';
+    const data: QueryResponse = await res.json();
+    const responseText = data.text_response;
 
     // Save photo to filesystem for display
     let savedUri: string | undefined;

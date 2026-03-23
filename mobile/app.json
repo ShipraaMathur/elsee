@@ -44,8 +44,16 @@
       ]
     ],
     "scheme": "seefore",
+    "name": "SeeForMe",
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "intentFilters": [
+      {
+        "action": "VIEW",
+        "data": [{ "scheme": "seefore" }],
+        "category": ["BROWSABLE", "DEFAULT"]
+      }
+    ]
   }
 }

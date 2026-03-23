@@ -1,10 +1,13 @@
 import { ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useState } from 'react';
+import { useAuth } from '../context/AuthContext';
+import { TouchableOpacity } from 'react-native-gesture-handler';
 
 export default function SettingsScreen() {
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [alertsEnabled, setAlertsEnabled] = useState(true);
+  const { user, logout } = useAuth();
 
   const geminiKey = process.env.EXPO_PUBLIC_GEMINI_API_KEY;
   const elevenlabsKey = process.env.EXPO_PUBLIC_ELEVENLABS_KEY;
@@ -50,6 +53,16 @@ export default function SettingsScreen() {
             </View>
           ))}
         </View>
+        <Text style={s.sectionLabel}>ACCOUNT</Text>
+          <View style={s.row}>
+            <View>
+              <Text style={s.rowLabel}>{user?.name || 'User'}</Text>
+              <Text style={s.rowNote}>{user?.email}</Text>
+            </View>
+            <TouchableOpacity onPress={logout} style={s.logoutBtn}>
+              <Text style={s.logoutText}>Sign Out</Text>
+            </TouchableOpacity>
+          </View>
 
       </ScrollView>
     </SafeAreaView>
@@ -122,4 +135,6 @@ const s = StyleSheet.create({
     borderWidth: 1, borderColor: '#1E2740',
   },
   techText: { color: '#5A6580', fontSize: 12 },
+  logoutBtn: { backgroundColor: 'rgba(255,77,109,0.15)', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6 },
+  logoutText: { color: '#FF4D6D', fontSize: 13, fontWeight: '600' },
 });

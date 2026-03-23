@@ -1,5 +1,6 @@
+
 {
-  "android": {
-    "package": "com.anonymous.seefore"
+  "expo": {
+    "scheme": "seefore"
   }
-}
+} 

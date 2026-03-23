@@ -9,6 +9,13 @@ Handles:
   - MongoDB Atlas: session logging
   - Snowflake: analytics logging
 """
+# main.py — load_dotenv MUST be first, before ANY local imports
+from pathlib import Path
+from dotenv import load_dotenv
+
+_backend_dir = Path(__file__).resolve().parent
+load_dotenv(_backend_dir.parent / ".env")
+load_dotenv(_backend_dir / ".env")
 
 import os
 from contextlib import asynccontextmanager
@@ -21,8 +28,10 @@ from routers import obstacles, query, scene, auth, health, dev_sync, public_conf
 from services.mongodb import connect_mongo, close_mongo
 from services.snowflake_client import init_snowflake
 
-load_dotenv()
+# load_dotenv()
 
+# Debug — remove after confirming it works
+print("MONGODB_URI:", os.getenv("MONGODB_URI", "NOT FOUND"))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
